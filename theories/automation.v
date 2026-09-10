@@ -167,15 +167,43 @@ Proof.
   unfold TCDone in *. split; rewrite bv_eq; rewrite bool_to_bv_unsigned //; destruct b1 => //=; lia.
 Qed.
 
-Global Instance simpl_SWriteMem a1 a2 v1 v2:
-  SimplBoth (SWriteMem a1 v1 = SWriteMem a2 v2) (a1 = a2 ∧ v1 = v2).
+Global Instance simpl_SWriteMem a1 a2 v1 v2 s1 s2:
+  SimplBoth (SWriteMem a1 v1 s1 = SWriteMem a2 v2 s2)
+    (a1 = a2 ∧ v1 = v2 ∧ s1 = s2).
 Proof. split; naive_solver. Qed.
-Global Instance simpl_SReadMem a1 a2 v1 v2:
-  SimplBoth (SReadMem a1 v1 = SReadMem a2 v2) (a1 = a2 ∧ v1 = v2).
+Global Instance simpl_SReadMem a1 a2 v1 v2 s1 s2:
+  SimplBoth (SReadMem a1 v1 s1 = SReadMem a2 v2 s2)
+    (a1 = a2 ∧ v1 = v2 ∧ s1 = s2).
 Proof. split; naive_solver. Qed.
-Global Instance simpl_SInstrTrap a1 a2:
-  SimplBoth (SInstrTrap a1 = SInstrTrap a2) (a1 = a2).
+Global Instance simpl_SInstrTrap a1 a2 s1 s2:
+  SimplBoth (SInstrTrap a1 s1 = SInstrTrap a2 s2) (a1 = a2 ∧ s1 = s2).
 Proof. split; naive_solver. Qed.
+
+Definition empty_seq_snapshot : seq_snapshot := {|
+  snap_regs := ∅;
+  snap_mem := ∅
+|}.
+
+Global Instance simpl_SWriteMem_event a1 a2 v1 v2:
+  SimplBoth ((SWriteMem a1 v1 : seq_event) = SWriteMem a2 v2)
+    (a1 = a2 ∧ v1 = v2).
+Proof.
+  split; [|naive_solver]. intros Heq.
+  have := f_equal (fun event => event empty_seq_snapshot) Heq. naive_solver.
+Qed.
+Global Instance simpl_SReadMem_event a1 a2 v1 v2:
+  SimplBoth ((SReadMem a1 v1 : seq_event) = SReadMem a2 v2)
+    (a1 = a2 ∧ v1 = v2).
+Proof.
+  split; [|naive_solver]. intros Heq.
+  have := f_equal (fun event => event empty_seq_snapshot) Heq. naive_solver.
+Qed.
+Global Instance simpl_SInstrTrap_event a1 a2:
+  SimplBoth ((SInstrTrap a1 : seq_event) = SInstrTrap a2) (a1 = a2).
+Proof.
+  split; [|naive_solver]. intros Heq.
+  have := f_equal (fun event => event empty_seq_snapshot) Heq. naive_solver.
+Qed.
 
 Global Instance simpl_impl_valu_has_shape_mask v n m z:
   SimplImpl (valu_has_shape v (MaskShape n m z))
@@ -1183,8 +1211,12 @@ Section instances.
       iDestruct (instr_addr_in_range with "Hi") as %?.
       rewrite !bv_wrap_small // in Hnorm. subst.
       rewrite Z_to_bv_bv_unsigned in Hscons.
-      iApply (wp_next_instr_extern with "HPC [$] [$]") => //.
-      spec_solver.
+      iApply (wp_next_instr_extern with "[] [] HPC [$] [$]").
+      + intros snapshot _ _.
+        specialize (Hscons [SInstrTrap nPC snapshot]). apply Hscons.
+        right. eexists _, []. split; [done|by left].
+      + rewrite /snapshot_reg_resources. done.
+      + rewrite /snapshot_mem_resources. done.
     - iApply (wp_next_instr_pre with "[$] [Hi] Hwp").
       iApply (instr_pre_wand with "Hi"); [by erewrite implb_same| |by iIntros "$"].
       by rewrite -Hnorm bv_wrap_small.
@@ -1479,11 +1511,17 @@ Section instances.
       iApply ("Hcont" with "Hl Ha1").
       have -> : (n0 - (bv_unsigned a - a0) - Z.of_N len) = (a0 + n0 - (bv_unsigned a + Z.of_N len)) by lia.
       done.
-    - iDestruct "Hcont" as (?? Pκs Pκs') "[Hκs [% Hcont]]"; simplify_eq/=.
-      iApply (wp_write_mmio with "[HP] Hκs"); [done | lia| spec_solver | | ].
-      { iApply (mmio_range_shorten with "HP"); lia. }
-      iIntros "Hspec". iApply "Hcont". iApply (spec_trace_mono with "Hspec").
-      spec_solver.
+    - iDestruct "Hcont" as (?? Pκs Pκs') "[Hκs [%Hscons Hcont]]"; simplify_eq/=.
+      iApply (wp_write_mmio with "[] [] [HP] Hκs").
+      + done.
+      + lia.
+      + intros snapshot _ _. specialize (Hscons [SWriteMem a vnew snapshot]).
+        apply Hscons. right. eexists _, []. split; [done|by left].
+      + rewrite /snapshot_reg_resources. done.
+      + rewrite /snapshot_mem_resources. done.
+      + iApply (mmio_range_shorten with "HP"); lia.
+      + iIntros (snapshot) "_ _ Hspec". iApply "Hcont".
+        iApply (spec_trace_mono with "Hspec"). spec_solver.
   Qed.
 
   Lemma li_wp_read_mem len n kind a vread tag ann es:
@@ -1513,11 +1551,17 @@ Section instances.
       iApply (wp_read_mem_array with "Hmem [Hcont]"); [done|lia|done|done|].
       iIntros (?) "Hl". by iApply "Hcont".
     - done.
-    - iDestruct "Hcont" as (?? Pκs Pκs') "[Hκs [% Hcont]]"; simplify_eq/=.
-      iApply (wp_read_mmio with "[Hmem] Hκs"); [done | lia| spec_solver | | ].
-      { iApply (mmio_range_shorten with "Hmem"); lia. }
-      iIntros "Hspec". iApply "Hcont". iApply (spec_trace_mono with "Hspec").
-      spec_solver.
+    - iDestruct "Hcont" as (?? Pκs Pκs') "[Hκs [%Hscons Hcont]]"; simplify_eq/=.
+      iApply (wp_read_mmio with "[] [] [Hmem] Hκs").
+      + done.
+      + lia.
+      + intros snapshot _ _. specialize (Hscons [SReadMem a vread snapshot]).
+        apply Hscons. right. eexists _, []. split; [done|by left].
+      + rewrite /snapshot_reg_resources. done.
+      + rewrite /snapshot_mem_resources. done.
+      + iApply (mmio_range_shorten with "Hmem"); lia.
+      + iIntros (snapshot) "_ _ Hspec". iApply "Hcont".
+        iApply (spec_trace_mono with "Hspec"). spec_solver.
   Qed.
 
   Lemma li_wpe_val v Φ ann:

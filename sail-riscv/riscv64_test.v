@@ -194,8 +194,18 @@ Definition riscv_test_sail_instrs : gmap addr encoded_instruction :=
   <[ (BV 64 0x0000000010300010) := Uncompressed (BV 32 0x00b50463)]> $
   ∅.
 
+Definition riscv_test_sail_snapshot_regs (regs : regstate) : reg_map :=
+  <[ "PC" := RVal_Bits (mword_to_bv (n2:=64) (PC regs)) ]> $
+  <[ "x2" := RVal_Bits (mword_to_bv (n2:=64) (x2 regs)) ]> $
+  <[ "x10" := RVal_Bits (mword_to_bv (n2:=64) (x10 regs)) ]> $
+  <[ "x11" := RVal_Bits (mword_to_bv (n2:=64) (x11 regs)) ]> $
+  sys_regs_map
+    (mword_to_bv (n2:=64) (Mstatus_bits (mstatus regs)))
+    (mword_to_bv (n2:=64) (satp regs)).
+
 Definition riscv_test_initial_sail_state (x2v : bv 64) (regs : regstate) : sail_state :=
-  SAIL (Done tt) regs (riscv_test_state_global x2v).(seq_mem) riscv_test_sail_instrs false.
+  SAIL (Done tt) regs (riscv_test_sail_snapshot_regs regs)
+    (riscv_test_state_global x2v).(seq_mem) riscv_test_sail_instrs false.
 
 Lemma riscv_test_safe regs (satpv x10v x2v mstatus_bits x11v : bv 64):
   plat_enable_pmp () = false →
@@ -223,6 +233,9 @@ Lemma riscv_test_safe regs (satpv x10v x2v mstatus_bits x11v : bv 64):
     (∀ κs σ', steps sail_module (riscv_test_initial_sail_state x2v regs) κs σ' → riscv_test_spec x11v κs).
 Proof.
   move => ?????????? ??? HPC Hx2 Hx10 Hx11 Hsatp Hcur_priv Hmisa Hmstatus.
+  rewrite /riscv_test_initial_sail_state /riscv_test_sail_snapshot_regs
+    Hx2 Hx10 Hx11 Hsatp Hmstatus HPC !mword_to_bv_to_mword.
+  all: try lia.
   apply: iris_transfer_refines.
   { apply iris_module_wf_isla_lang. }
   { move => ????. by apply (riscv_test_adequate mstatus_bits satpv x2v x10v x11v). }

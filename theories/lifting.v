@@ -127,7 +127,8 @@ Definition instr_pre'_def `{!Arch} `{!islaG Σ} `{!threadG} (is_later : bool) (a
     instr (bv_wrap 64 a) ins ∗
     match ins with
     | Some t => arch_pc_reg ↦ᵣ RVal_Bits (Z_to_bv 64 a) -∗ WPasm t
-    | None => ∃ Pκs, ⌜Pκs [SInstrTrap (Z_to_bv 64 a)]⌝ ∗ spec_trace Pκs
+    | None => ∃ Pκs,
+        ⌜∀ s, Pκs [SInstrTrap (Z_to_bv 64 a) s]⌝ ∗ spec_trace Pκs
     end
    ).
 Definition instr_pre'_aux `{!Arch} `{!islaG Σ} `{!threadG} : seal (@instr_pre'_def _ Σ _ _). by eexists. Qed.
@@ -177,6 +178,103 @@ Ltac inv_seq_step :=
 
 Section lifting.
   Context `{!Arch} `{!islaG Σ} `{!threadG}.
+
+  Definition snapshot_reg_resources
+      (claims : list (sail_name * valu)) : iProp Σ :=
+    ([∗ list] claim ∈ claims, claim.1 ↦ᵣ claim.2)%I.
+
+  Definition snapshot_mem_resources
+      (claims : list (Z * list byte)) : iProp Σ :=
+    ([∗ list] claim ∈ claims, claim.1 ↦ₘ∗ claim.2)%I.
+
+  Definition snapshot_reg_agreement
+      (snapshot : seq_snapshot) (claims : list (sail_name * valu)) : Prop :=
+    Forall (fun claim => snapshot.(snap_regs) !! claim.1 = Some claim.2)
+      claims.
+
+  Definition snapshot_mem_agreement
+      (snapshot : seq_snapshot) (claims : list (Z * list byte)) : Prop :=
+    Forall (fun claim =>
+      read_mem_list snapshot.(snap_mem) claim.1
+        (N.of_nat (length claim.2)) = Some claim.2) claims.
+
+  Lemma snapshot_reg_resources_agree regs claims :
+    regs_ctx regs -∗ snapshot_reg_resources claims -∗
+    ⌜Forall (fun claim => regs !! claim.1 = Some claim.2) claims⌝.
+  Proof.
+    iIntros "Hregs Hclaims". iInduction claims as [|[reg value] claims] "IH".
+    { iPureIntro. constructor. }
+    rewrite /snapshot_reg_resources big_sepL_cons.
+    iDestruct "Hclaims" as "[Hreg Hclaims]".
+    iDestruct (reg_mapsto_lookup with "Hregs Hreg") as %Hlookup.
+    iDestruct ("IH" with "Hregs Hclaims") as %Htail.
+    iPureIntro. constructor; assumption.
+  Qed.
+
+  Lemma snapshot_byte_array_roundtrip (bytes : list byte) :
+    bv_to_little_endian (length bytes) 8
+      (bv_unsigned
+        (Z_to_bv (8 * N.of_nat (length bytes))%N
+          (little_endian_to_bv 8 bytes))) = bytes.
+  Proof.
+    have Hbound :
+      (0 ≤ little_endian_to_bv 8 bytes <
+        bv_modulus (8 * N.of_nat (length bytes)))%Z.
+    { pose proof (little_endian_to_bv_bound 8 bytes).
+      unfold bv_modulus. rewrite N2Z.inj_mul.
+      replace (Z.of_N (N.of_nat (length bytes))) with
+        (Z.of_nat (length bytes)) by lia.
+      replace (8 * Z.of_nat (length bytes))%Z with
+        (Z.of_nat (length bytes) * 8)%Z by lia.
+      exact H1. }
+    rewrite Z_to_bv_small; [apply bv_to_little_endian_to_bv; lia | done].
+  Qed.
+
+  Lemma snapshot_byte_array_to_mapsto a (bytes : list byte) :
+    a ↦ₘ∗ bytes -∗
+    a ↦ₘ
+      (Z_to_bv (8 * N.of_nat (length bytes))%N
+        (little_endian_to_bv 8 bytes)).
+  Proof.
+    rewrite mem_mapsto_array_eq mem_mapsto_eq /mem_mapsto_array_def
+      /mem_mapsto_def.
+    iIntros "Harray". iDestruct "Harray" as (len Hlen Hrange) "Harray".
+    have Hlen' : len = 1%N by nia. subst len.
+    iExists (length bytes). iSplit; [iPureIntro; lia |].
+    iSplit; [iPureIntro; nia |]. rewrite snapshot_byte_array_roundtrip.
+    iApply (big_sepL_impl with "Harray").
+    iIntros "!>" (index value Hlookup) "Hvalue".
+    rewrite mem_mapsto_eq /mem_mapsto_def.
+    iDestruct "Hvalue" as (byteLen HbyteLen HbyteRange) "Hvalue".
+    have HbyteLen' : byteLen = 1%nat by nia. subst byteLen.
+    iEval (cbn; rewrite Z.mul_1_r) in "Hvalue".
+    iDestruct "Hvalue" as "[Hvalue _]".
+    rewrite /= Z.add_0_r -(bv_wrap_land 8) bv_wrap_small
+      ?Z_to_bv_bv_unsigned; [iExact "Hvalue" | apply bv_unsigned_in_range].
+  Qed.
+
+  Lemma snapshot_mem_resources_agree mem claims :
+    mem_ctx mem -∗ snapshot_mem_resources claims -∗
+    ⌜Forall (fun claim =>
+      read_mem_list mem claim.1 (N.of_nat (length claim.2)) =
+        Some claim.2) claims⌝.
+  Proof.
+    iIntros "Hmem Hclaims". iInduction claims as [|[address bytes] claims] "IH".
+    { iPureIntro. constructor. }
+    rewrite /snapshot_mem_resources big_sepL_cons.
+    iDestruct "Hclaims" as "[Harray Hclaims]".
+    iDestruct (snapshot_byte_array_to_mapsto with "Harray") as "Hvalue".
+    iDestruct (mem_mapsto_lookup_list with "Hmem Hvalue") as
+      %[count [Hcount Hlookup]].
+    have Hcount' : count = length bytes.
+    { apply N.mul_cancel_l in Hcount; [|lia].
+      have HcountNat := f_equal N.to_nat Hcount.
+      rewrite !Nat2N.id in HcountNat. symmetry. exact HcountNat. }
+    subst count.
+    rewrite snapshot_byte_array_roundtrip in Hlookup.
+    iDestruct ("IH" with "Hmem Hclaims") as %Htail.
+    iPureIntro. constructor; assumption.
+  Qed.
 
   (** * Unfolding *)
   Lemma wp_asm_unfold e :
@@ -260,7 +358,7 @@ Section lifting.
     iIntros "HPC Hi Hcont". setoid_rewrite wp_asm_unfold.
     iIntros ([????]) "/= -> -> -> Hθ".
     iApply wp_lift_step; [done|].
-    iIntros (σ1 ??? ?) "(Hsctx&Hictx&?)".
+    iIntros (σ1 ??? ?) "(Hsctx&Hictx&Hmem)".
     iApply fupd_mask_intro; first set_solver. iIntros "HE".
     iDestruct (reg_mapsto_lookup with "Hθ HPC") as %HPC.
     iDestruct (instr_lookup_unsigned with "Hictx Hi") as %?.
@@ -277,20 +375,28 @@ Section lifting.
     iFrame.
   Qed.
 
-  Lemma wp_next_instr_extern (PC : bv 64) (Pκs : spec):
-    Pκs [SInstrTrap PC] →
+  Lemma wp_next_instr_extern (PC : bv 64) (Pκs : spec)
+      (regClaims : list (sail_name * valu))
+      (memClaims : list (Z * list byte)):
+    (∀ s, snapshot_reg_agreement s regClaims →
+      snapshot_mem_agreement s memClaims → Pκs [SInstrTrap PC s]) →
+    snapshot_reg_resources regClaims -∗
+    snapshot_mem_resources memClaims -∗
     arch_pc_reg ↦ᵣ RVal_Bits PC -∗
     instr (bv_unsigned PC) None -∗
     ▷ spec_trace Pκs -∗
     WPasm tnil.
   Proof.
-    iIntros (?) "HPC Hi Hspec". setoid_rewrite wp_asm_unfold.
+    iIntros (Haccept) "HregClaims HmemClaims HPC Hi Hspec".
+    setoid_rewrite wp_asm_unfold.
     iIntros ([? regs ? ?]) "/= -> -> -> Hθ".
     iApply wp_lift_step; [done|].
-    iIntros (σ1 ??? ?) "(Hsctx&Hictx&?)".
+    iIntros (σ1 ??? ?) "(Hsctx&Hictx&Hmem)".
     iApply fupd_mask_intro; first set_solver. iIntros "HE".
     iDestruct (reg_mapsto_lookup with "Hθ HPC") as %HPC.
     iDestruct (instr_lookup_unsigned with "Hictx Hi") as %?.
+    iDestruct (snapshot_reg_resources_agree with "Hθ HregClaims") as %HregAgree.
+    iDestruct (snapshot_mem_resources_agree with "Hmem HmemClaims") as %HmemAgree.
     iSplit. {
       iPureIntro. eexists _, _, _, _; simpl. econstructor; [done |by econstructor|]; simpl.
       split; [done|]. eexists _. by simplify_option_eq.
@@ -299,7 +405,9 @@ Section lifting.
     inv_seq_step.
     revert select (∃ _, _) => -[?[?]]. unfold sail_name in *; simplify_option_eq.
     move => [-> ->].
-    iMod (spec_ctx_cons with "Hsctx Hspec") as "[??]"; [done|]. iModIntro.
+    iMod (spec_ctx_cons with "Hsctx Hspec") as "[??]".
+    { apply Haccept; assumption. }
+    iModIntro.
     iFrame. iSplitL; [|done].
     by iApply wp_value.
     Unshelve. apply: tnil.
@@ -317,8 +425,11 @@ Section lifting.
     iDestruct (laterN_le _ 1 with "Hwp") as "Hwp". { destruct l => /=; lia. }
     destruct ins; rewrite Z_to_bv_bv_unsigned.
     - by iApply (wp_next_instr with "HPC Hinstr"); [done..|].
-    - iDestruct "Hwp" as (?) "[>% Hwp]".
-      by iApply (wp_next_instr_extern with "[$] [$] [$]").
+    - iDestruct "Hwp" as (Pκs) "[>%Haccept Hwp]".
+      iApply (wp_next_instr_extern with "[] [] [$] [$] [$]").
+      + intros snapshot _ _. exact (Haccept snapshot).
+      + rewrite /snapshot_reg_resources. done.
+      + rewrite /snapshot_mem_resources. done.
   Qed.
 
   Lemma instr_pre_wand a1 a2 l1 l2 P Q:
@@ -355,7 +466,8 @@ Section lifting.
 
   Lemma instr_pre_intro_None P a l:
     instr a None -∗
-    (P -∗ ∃ Pκs, ⌜Pκs [SInstrTrap (Z_to_bv 64 a)]⌝ ∗ spec_trace Pκs) -∗
+    (P -∗ ∃ Pκs,
+      ⌜∀ s, Pκs [SInstrTrap (Z_to_bv 64 a) s]⌝ ∗ spec_trace Pκs) -∗
     instr_pre' l a P.
   Proof.
     rewrite instr_pre'_eq.
@@ -563,16 +675,24 @@ Section lifting.
     iIntros (?) "Hl". iApply ("Hcont" with "[//]"). by iApply "Hm".
   Qed.
 
-  Lemma wp_read_mmio n len a (vread : bv _) es ann kind tag (Pκs : spec):
+  Lemma wp_read_mmio n len a (vread : bv _) es ann kind tag (Pκs : spec)
+      (regClaims : list (sail_name * valu))
+      (memClaims : list (Z * list byte)):
     n = (8 * len)%N →
     0 < Z.of_N len →
-    Pκs [SReadMem a vread] →
+    (∀ s, snapshot_reg_agreement s regClaims →
+      snapshot_mem_agreement s memClaims → Pκs [SReadMem a vread s]) →
+    snapshot_reg_resources regClaims -∗
+    snapshot_mem_resources memClaims -∗
     mmio_range (bv_unsigned a) (Z.of_N len) -∗
     spec_trace Pκs -∗
-    (spec_trace (λ κs, Pκs (SReadMem a vread::κs)) -∗ WPasm es) -∗
+    (∀ s, ⌜snapshot_reg_agreement s regClaims⌝ -∗
+      ⌜snapshot_mem_agreement s memClaims⌝ -∗
+      spec_trace (λ κs, Pκs (SReadMem a vread s :: κs)) -∗ WPasm es) -∗
     WPasm (ReadMem (RVal_Bits (@bv_to_bvn n vread)) kind (RVal_Bits (@bv_to_bvn 64 a)) len tag ann :t: es).
   Proof.
-    iIntros (???) "Hm Hspec Hcont". subst. setoid_rewrite wp_asm_unfold.
+    iIntros (?? Haccept) "HregClaims HmemClaims Hm Hspec Hcont".
+    subst. setoid_rewrite wp_asm_unfold.
     iIntros ([????]) "/= -> -> -> Hθ".
     iApply wp_lift_step; [done|].
     iIntros (σ1 ????) "(Hctx&Hictx&Hmem)".
@@ -581,6 +701,8 @@ Section lifting.
     rewrite N2Z.id in Hread.
     iDestruct (mmio_range_in_range with "Hm") as %?.
     iDestruct (mmio_range_Forall with "Hmem Hm") as %?.
+    iDestruct (snapshot_reg_resources_agree with "Hθ HregClaims") as %HregAgree.
+    iDestruct (snapshot_mem_resources_agree with "Hmem HmemClaims") as %HmemAgree.
     iSplit. {
       iPureIntro. eexists _, _, _, _. simpl. econstructor; [done | by econstructor |] => /=.
       eexists _, _, (bv_0 _). simplify_option_eq. naive_solver.
@@ -588,9 +710,10 @@ Section lifting.
     iIntros "!>" (????) "_". iMod "HE" as "_".
     inv_seq_step.
     revert select (∃ _, _) => -[?[?[?[?[??]]]]]; simplify_option_eq; destruct_and!; simplify_eq.
-    iMod (spec_ctx_cons with "Hctx Hspec") as "[Hctx Hspec]"; [done|].
+    iMod (spec_ctx_cons with "Hctx Hspec") as "[Hctx Hspec]";
+      [apply Haccept; assumption|].
     iFrame. iModIntro. iSplitL; [|done].
-    by iApply ("Hcont" with "Hspec").
+    by iApply ("Hcont" with "[] [] Hspec").
   Qed.
 
   Lemma wp_write_mem n len a (vold vnew : bv n) es ann res kind tag:
@@ -635,16 +758,24 @@ Section lifting.
     iIntros "Hl". iApply ("Hcont"). by iApply "Hm".
   Qed.
 
-  Lemma wp_write_mmio n len a (vnew : bv n) es ann res kind tag (Pκs : spec):
+  Lemma wp_write_mmio n len a (vnew : bv n) es ann res kind tag (Pκs : spec)
+      (regClaims : list (sail_name * valu))
+      (memClaims : list (Z * list byte)):
     n = (8 * len)%N →
     0 < Z.of_N len →
-    Pκs [SWriteMem a vnew] →
+    (∀ s, snapshot_reg_agreement s regClaims →
+      snapshot_mem_agreement s memClaims → Pκs [SWriteMem a vnew s]) →
+    snapshot_reg_resources regClaims -∗
+    snapshot_mem_resources memClaims -∗
     mmio_range (bv_unsigned a) (Z.of_N len) -∗
     spec_trace Pκs -∗
-    (spec_trace (λ κs, Pκs (SWriteMem a vnew::κs)) -∗ WPasm es) -∗
+    (∀ s, ⌜snapshot_reg_agreement s regClaims⌝ -∗
+      ⌜snapshot_mem_agreement s memClaims⌝ -∗
+      spec_trace (λ κs, Pκs (SWriteMem a vnew s :: κs)) -∗ WPasm es) -∗
     WPasm (WriteMem (RVal_Bool res) kind (RVal_Bits (@bv_to_bvn 64 a)) (RVal_Bits (@bv_to_bvn n vnew)) len tag ann :t: es).
   Proof.
-    iIntros (???) "Hm Hspec Hcont". subst. setoid_rewrite wp_asm_unfold.
+    iIntros (?? Haccept) "HregClaims HmemClaims Hm Hspec Hcont".
+    subst. setoid_rewrite wp_asm_unfold.
     iIntros ([????]) "/= -> -> -> Hθ".
     iApply wp_lift_step; [done|].
     iIntros (σ1 ????) "(Hctx&Hictx&Hmem)".
@@ -653,6 +784,8 @@ Section lifting.
     rewrite N2Z.id in Hread.
     iDestruct (mmio_range_in_range with "Hm") as %?.
     iDestruct (mmio_range_Forall with "Hmem Hm") as %?.
+    iDestruct (snapshot_reg_resources_agree with "Hθ HregClaims") as %HregAgree.
+    iDestruct (snapshot_mem_resources_agree with "Hmem HmemClaims") as %HmemAgree.
     iSplit. {
       iPureIntro. eexists _, _, _, _. simpl. econstructor; [done | by econstructor |]. simpl.
       eexists ∅, _, _. simplify_option_eq. naive_solver.
@@ -660,9 +793,10 @@ Section lifting.
     iIntros "!>" (????) "_". iMod "HE" as "_".
     inv_seq_step.
     revert select (∃ _, _) => -[?[?[?[?[??]]]]]; simplify_option_eq; destruct_and!; simplify_eq.
-    iMod (spec_ctx_cons with "Hctx Hspec") as "[Hctx Hspec]"; [done|].
+    iMod (spec_ctx_cons with "Hctx Hspec") as "[Hctx Hspec]";
+      [apply Haccept; assumption|].
     iFrame. iModIntro. iSplitL; [|done].
-    by iApply ("Hcont" with "Hspec").
+    by iApply ("Hcont" with "[] [] Hspec").
   Qed.
 
   (** * Other lifting lemmas  *)

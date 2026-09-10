@@ -445,6 +445,7 @@ Inductive encoded_instruction :=
 Record sail_state := SAIL {
   sail_monad : M ();
   sail_regs : regstate;
+  sail_snapshot_regs : reg_map;
   sail_mem : mem_map;
   sail_instrs : gmap addr encoded_instruction;
   sail_stopped : bool;
@@ -472,21 +473,31 @@ Definition step_cpu (i : encoded_instruction) : M () :=
 
 
 Inductive sail_step : sail_state → option seq_label → sail_state → Prop :=
-| SailDone rs h i ins :
+| SailDone rs regs h i ins :
   ins !! mword_to_bv (PC rs) = Some i →
-  sail_step (SAIL (Done tt) rs h ins false) None (SAIL (step_cpu i) rs h ins false)
-| SailStop rs h ins :
+  sail_step (SAIL (Done tt) rs regs h ins false) None
+    (SAIL (step_cpu i) rs regs h ins false)
+| SailStop rs regs h ins :
   ins !! mword_to_bv (PC rs) = None →
-  sail_step (SAIL (Done tt) rs h ins false) (Some (SInstrTrap (mword_to_bv (PC rs)))) (SAIL (Done tt) rs h ins true)
-| SailChoose rs h ins ty e s v:
-  sail_step (SAIL (Choose s ty e) rs h ins false) None (SAIL (e v) rs h ins false)
-| SailReadReg rs h ins e r v:
+  sail_step (SAIL (Done tt) rs regs h ins false)
+    (Some (SInstrTrap (mword_to_bv (PC rs))
+      {| snap_regs := regs; snap_mem := h |}))
+    (SAIL (Done tt) rs regs h ins true)
+| SailChoose rs regs h ins ty e s v:
+  sail_step (SAIL (Choose s ty e) rs regs h ins false) None
+    (SAIL (e v) rs regs h ins false)
+| SailReadReg rs regs h ins e r v:
   get_regval r rs = Some v →
-  sail_step (SAIL (Read_reg r e) rs h ins false) None (SAIL (e v) rs h ins false)
-| SailWriteReg rs rs' h ins e r v:
+  sail_step (SAIL (Read_reg r e) rs regs h ins false) None
+    (SAIL (e v) rs regs h ins false)
+| SailWriteReg rs rs' regs h ins e r v:
   set_regval r v rs = Some rs' →
-  sail_step (SAIL (Write_reg r v e) rs h ins false) None (SAIL e rs' h ins false)
-| SailReadMem rs h ins e a bs' sz κ adr len:
+  sail_step (SAIL (Write_reg r v e) rs regs h ins false) None
+    (SAIL e rs'
+      (if bool_decide (r = "nextPC") then regs
+       else <[r := register_value_to_valu r v]> regs)
+      h ins false)
+| SailReadMem rs regs h ins e a bs' sz κ adr len:
   adr = (Z_to_bv 64 (Z.of_N a)) →
   (len = N.of_nat sz)%N →
   length bs' = sz →
@@ -496,9 +507,11 @@ Inductive sail_step : sail_state → option seq_label → sail_state → Prop :=
   else
     Z.of_N a + Z.of_N len ≤ 2 ^ 64 ∧
     set_Forall (λ ad, ¬ (Z.of_N a ≤ bv_unsigned ad < Z.of_N a + Z.of_N len)) (dom h) ∧
-    κ = Some (SReadMem adr (Z_to_bv (8 * len) (little_endian_to_bv 8 bs')))) →
-  sail_step (SAIL (Read_mem Read_plain a sz e) rs h ins false) κ (SAIL (e (byte_to_memory_byte <$> bs')) rs h ins false)
-| SailWriteMem rs h h' ins e a bs bs' sz len adr κ:
+    κ = Some (SReadMem adr (Z_to_bv (8 * len) (little_endian_to_bv 8 bs'))
+      {| snap_regs := regs; snap_mem := h |})) →
+  sail_step (SAIL (Read_mem Read_plain a sz e) rs regs h ins false) κ
+    (SAIL (e (byte_to_memory_byte <$> bs')) rs regs h ins false)
+| SailWriteMem rs regs h h' ins e a bs bs' sz len adr κ:
   adr = (Z_to_bv 64 (Z.of_N a)) →
   (len = N.of_nat sz)%N →
   bs = byte_to_memory_byte <$> bs' →
@@ -509,10 +522,13 @@ Inductive sail_step : sail_state → option seq_label → sail_state → Prop :=
     Z.of_N a + Z.of_N len ≤ 2 ^ 64 ∧
     set_Forall (λ ad, ¬ (Z.of_N a ≤ bv_unsigned ad < Z.of_N a + Z.of_N len)) (dom h) ∧
     h = h' ∧
-    κ = Some (SWriteMem adr (Z_to_bv (8 * len) (little_endian_to_bv 8 bs')))) →
-  sail_step (SAIL (Write_mem Write_plain a sz bs e) rs h ins false) κ (SAIL (e true) rs h' ins false)
-| SailWriteEa rs h ins e wk n1 n2:
-  sail_step (SAIL (Write_ea wk n1 n2 e) rs h ins false) None (SAIL e rs h ins false)
+    κ = Some (SWriteMem adr (Z_to_bv (8 * len) (little_endian_to_bv 8 bs'))
+      {| snap_regs := regs; snap_mem := h |})) →
+  sail_step (SAIL (Write_mem Write_plain a sz bs e) rs regs h ins false) κ
+    (SAIL (e true) rs regs h' ins false)
+| SailWriteEa rs regs h ins e wk n1 n2:
+  sail_step (SAIL (Write_ea wk n1 n2 e) rs regs h ins false) None
+    (SAIL e rs regs h ins false)
 .
 
 Definition sail_module := {|
@@ -595,11 +611,11 @@ Definition sim {A E} (Σ : sim_state) (e1 : monad register_value A E) (K : mctx 
       private_regs_wf isla_regs' →
       dom isla_regs' = dom isla_regs →
       raw_sim sail_module (iris_module isla_lang) n
-          (SAIL (Done tt) sail_regs' mem' sail_instrs false)
+          (SAIL (Done tt) sail_regs' isla_regs' mem' sail_instrs false)
           ({| seq_trace := tnil; seq_regs := isla_regs'; seq_nb_state := false; seq_pc_reg := arch_pc_reg|},
            {| seq_instrs := isla_instrs; seq_mem := mem' |})) →
   raw_sim sail_module (iris_module isla_lang) n
-          (SAIL (mctx_interp K e1) Σ.(sim_regs) mem sail_instrs false)
+          (SAIL (mctx_interp K e1) Σ.(sim_regs) isla_regs mem sail_instrs false)
           ({| seq_trace := e2; seq_regs := isla_regs; seq_nb_state := false; seq_pc_reg := arch_pc_reg|},
            {| seq_instrs := isla_instrs; seq_mem := mem |}).
 
@@ -611,7 +627,7 @@ Lemma sim_implies_refines sail_instrs isla_instrs sail_regs isla_regs mem :
   isla_regs_wf sail_regs isla_regs →
   private_regs_wf isla_regs →
   (∀ a si ii, sail_instrs !! a = Some si → isla_instrs !! a = Some ii → sim_instr si ii) →
-  refines sail_module (SAIL (Done tt) sail_regs mem sail_instrs false)
+  refines sail_module (SAIL (Done tt) sail_regs isla_regs mem sail_instrs false)
           (iris_module isla_lang) (initial_local_state isla_regs, {| seq_instrs := isla_instrs; seq_mem := mem |}).
 Proof.
   move => Hdom Hregs Hpriv Hsim. apply: raw_sim_implies_refines => n.
@@ -631,7 +647,8 @@ Proof.
     move => ???? Hstep. inversion_clear Hstep; simplify_eq. split; [done|].
     apply: raw_sim_step_s. {
       econstructor. econstructor; [done| econstructor |] => /=. split; [done|].
-      eexists _; simplify_option_eq. naive_solver.
+      eexists (mword_to_bv (PC sail_regs)). split; [done|].
+      rewrite Hii. naive_solver.
     }
     apply: Hsim; [done..|].
     move => sail_regs' isla_regs' mem' Hwf' ??.
@@ -781,7 +798,7 @@ Lemma sim_write_reg {A E} Σ (r : register_ref _ _ A) e2 v K v' ann:
   sim (E:=E) Σ (write_reg r v) K (WriteReg (name r) [] v' ann :t: e2).
 Proof.
   destruct Σ => /=.
-  move => ? Hset -> Hsim ? isla_regs ? ?? Hwf ? Hdone. rewrite mctx_interp_Write_reg.
+  move => ? Hset -> Hsim ? isla_regs ? ?? Hwf Hpriv Hdone. rewrite mctx_interp_Write_reg.
   apply: raw_sim_step_i. { right. eexists _, _. by constructor. }
   move => ????/= Hstep. inversion_clear Hstep; simplify_eq. split; [done|].
   apply: raw_sim_safe_here => /= -[|Hsafe]. { unfold seq_to_val. by case. }
@@ -792,6 +809,10 @@ Proof.
     econstructor. econstructor; [done| by econstructor|] => /=.
     eexists _, _, _. done.
   }
+  have Hnext : name r ≠ "nextPC".
+  { move => Hnext. unfold private_regs_wf in Hpriv.
+    rewrite Hnext in Hvi. rewrite Hvi in Hpriv. done. }
+  rewrite bool_decide_false //.
   apply: raw_sim_weaken; [apply Hsim => /=| ].
   - move => r' vi'. destruct (decide (r' = name r)); simplify_eq.
     + rewrite lookup_insert. move: Hset => /get_set_regval.
@@ -814,6 +835,7 @@ Proof.
   move => Hset Heq Hsim ? isla_regs ? ?? Hwf ? Hdone. rewrite mctx_interp_Write_reg.
   apply: raw_sim_step_i. { right. eexists _, _. by constructor. }
   move => ????/= Hstep. inversion_clear Hstep; simplify_eq. split; [done|].
+  rewrite bool_decide_true //.
   apply: raw_sim_weaken; [apply Hsim => /=; [|done..]| lia].
   move => ?? Hisla. have [?[??]]:= Hwf _ _ ltac:(done).
   eexists _. split; [|done].
