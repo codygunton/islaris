@@ -67,10 +67,21 @@ Canonical Structure specO := list seq_label -d> PropO.
 Definition snil : spec :=
   λ κs, κs = [].
 
-Definition scons (l : seq_label) (P : spec) : spec :=
-  λ κs, κs = [] ∨ ∃ κs', κs = l::κs' ∧ (κs' = [] ∨ P κs').
+Definition seq_event := seq_snapshot -> seq_label.
 
-Definition sapp (ls : list seq_label) (P : spec) : spec :=
+(** The default combinator matches the event payload and ignores its snapshot. *)
+Definition scons (event : seq_event) (P : spec) : spec :=
+  λ κs, κs = [] ∨
+    ∃ s κs', κs = event s :: κs' ∧ (κs' = [] ∨ P κs').
+
+(** This combinator also exposes the snapshot to a pure constraint. *)
+Definition scons_snap (event : seq_event) (accept : seq_snapshot -> Prop)
+    (P : spec) : spec :=
+  λ κs, κs = [] ∨
+    ∃ s κs', accept s ∧ κs = event s :: κs' ∧
+      (κs' = [] ∨ P κs').
+
+Definition sapp (ls : list seq_event) (P : spec) : spec :=
   foldr scons P ls.
 
 Definition sexists {A} (P : A → spec) : spec :=
@@ -83,7 +94,8 @@ Definition srec (P : spec → spec) : spec :=
   least_fixpoint P.
 
 Ltac spec_unfold :=
-  unfold subseteq, spec_subseteq, equiv, spec_equiv, scons, snil, sexists, sif in *.
+  unfold subseteq, spec_subseteq, equiv, spec_equiv, scons, scons_snap,
+    snil, sexists, sif in *.
 Ltac spec_solver := spec_unfold; naive_solver.
 
 Global Instance spec_equiv_equiv : Equivalence (≡@{spec}).

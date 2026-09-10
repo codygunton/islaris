@@ -451,11 +451,22 @@ Record seq_local_state := {
 }.
 Global Instance eta_seq_local_state : Settable _ := settable! Build_seq_local_state <seq_trace; seq_regs; seq_pc_reg ;seq_nb_state>.
 
+Record seq_snapshot := {
+  snap_regs : reg_map;
+  snap_mem : mem_map;
+}.
+
 Inductive seq_label : Set :=
-| SReadMem (a : addr) (v : bvn)
-| SWriteMem (a : addr) (v : bvn)
-| SInstrTrap (pc : addr)
+| SReadMem (a : addr) (v : bvn) (s : seq_snapshot)
+| SWriteMem (a : addr) (v : bvn) (s : seq_snapshot)
+| SInstrTrap (pc : addr) (s : seq_snapshot)
 .
+
+Definition seq_state_snapshot (theta : seq_local_state)
+    (sigma : seq_global_state) : seq_snapshot := {|
+  snap_regs := theta.(seq_regs);
+  snap_mem := sigma.(seq_mem)
+|}.
 
 Definition read_mem_list (mem : mem_map) (a : Z) (len : N) : option (list byte) :=
   mapM (M := option) (λ x, Z_to_bv_checked 64 x ≫= (mem !!.)) (seqZ a (Z.of_N len)).
@@ -518,7 +529,7 @@ Inductive seq_step : seq_local_state → seq_global_state → list seq_label →
       else
         bv_unsigned addr' + Z.of_N len ≤ 2 ^ 64 ∧
         set_Forall (λ a, ¬ (bv_unsigned addr' ≤ bv_unsigned a < bv_unsigned addr' + Z.of_N len)) (dom σ.(seq_mem)) ∧
-        κ' = Some (SReadMem addr' data') ∧
+        κ' = Some (SReadMem addr' data' (seq_state_snapshot θ σ)) ∧
         σ' = σ ∧
         θ' = θ <| seq_trace := t' |>
     | Some (LWriteMem res kind addr data len tag) =>
@@ -538,7 +549,7 @@ Inductive seq_step : seq_local_state → seq_global_state → list seq_label →
       else
         bv_unsigned addr' + Z.of_N len ≤ 2 ^ 64 ∧
         set_Forall (λ a, ¬ (bv_unsigned addr' ≤ bv_unsigned a < bv_unsigned addr' + Z.of_N len)) (dom σ.(seq_mem)) ∧
-        κ' = Some (SWriteMem addr' data') ∧
+        κ' = Some (SWriteMem addr' data' (seq_state_snapshot θ σ)) ∧
         σ' = σ ∧
         θ' = θ <| seq_trace := t' |>
       )
@@ -555,7 +566,9 @@ Inductive seq_step : seq_local_state → seq_global_state → list seq_label →
       ∃ pc : bv 64, θ.(seq_regs) !! θ.(seq_pc_reg) = Some (RVal_Bits pc) ∧
       match σ.(seq_instrs) !! pc with
       | Some es' => θ' = θ <| seq_trace := t'|> ∧ es = es' ∧ κ' = None
-      | None => κ' = Some (SInstrTrap pc) ∧ θ' = θ <| seq_nb_state := true|>
+      | None =>
+        κ' = Some (SInstrTrap pc (seq_state_snapshot θ σ)) ∧
+        θ' = θ <| seq_nb_state := true|>
       end
     | Some (LAssert b) =>
       σ' = σ ∧
