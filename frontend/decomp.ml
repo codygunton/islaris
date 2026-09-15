@@ -247,7 +247,7 @@ let gen_spec_file : Arch.t -> Template.t -> string -> string list
     (* SimplifyHyp rule. *)
     pp "@.Definition %s_spec_inst `{!islaG Σ} `{!threadG} pc :=@." name;
     pp "  entails_to_simplify_hyp 0 (%s_spec pc).@." name;
-    pp "Global Existing Instance %s_spec_inst.@." name
+    pp "#[export] Existing Instance %s_spec_inst.@." name
   in
   let spec_file = Filename.concat output_dir (name ^ "_spec.v") in
   Format.write_file spec_file write_spec
