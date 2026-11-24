@@ -90,7 +90,9 @@ Definition test_state_global := {|
     <[ (BV 64 0x0000000010300010) := a10]> $
     <[ (BV 64 0x0000000010300014) := a14]> $
     ∅;
-    seq_mem := ∅
+    seq_mem := ∅;
+    seq_charged := ∅;
+    seq_fetches := 0
 |}.
 
 
@@ -255,7 +257,9 @@ Definition test_state2_global  := {|
     <[(BV 64 0x0000000010300034) := a34]> $
     <[(BV 64 0x0000000010300038) := a38]> $
     ∅;
-  seq_mem := ∅
+  seq_mem := ∅;
+  seq_charged := ∅;
+  seq_fetches := 0
 |}.
 
 Definition test_state2_spec : spec :=

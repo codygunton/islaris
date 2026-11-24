@@ -441,8 +441,12 @@ Proof. destruct b. constructor. Qed.
 Record seq_global_state := {
   seq_instrs : gmap addr isla_trace;
   seq_mem    : mem_map;
+  (** Addresses whose fetch is counted in [seq_fetches]. *)
+  seq_charged : gset addr;
+  (** Number of fetches of instructions at addresses in [seq_charged]. *)
+  seq_fetches : nat;
 }.
-Global Instance eta_seq_global_state : Settable _ := settable! Build_seq_global_state <seq_instrs; seq_mem>.
+Global Instance eta_seq_global_state : Settable _ := settable! Build_seq_global_state <seq_instrs; seq_mem; seq_charged; seq_fetches>.
 Record seq_local_state := {
   seq_trace    : isla_trace;
   seq_regs     : reg_map;
@@ -562,11 +566,13 @@ Inductive seq_step : seq_local_state → seq_global_state → list seq_label →
       θ' = θ <| seq_trace := t'|> ∧
       σ' = σ
     | Some (LDone es) =>
-      σ' = σ ∧
       ∃ pc : bv 64, θ.(seq_regs) !! θ.(seq_pc_reg) = Some (RVal_Bits pc) ∧
       match σ.(seq_instrs) !! pc with
-      | Some es' => θ' = θ <| seq_trace := t'|> ∧ es = es' ∧ κ' = None
+      | Some es' => θ' = θ <| seq_trace := t'|> ∧ es = es' ∧ κ' = None ∧
+        σ' = (if decide (pc ∈ σ.(seq_charged))
+              then σ <| seq_fetches := S σ.(seq_fetches) |> else σ)
       | None =>
+        σ' = σ ∧
         κ' = Some (SInstrTrap pc (seq_state_snapshot θ σ)) ∧
         θ' = θ <| seq_nb_state := true|>
       end

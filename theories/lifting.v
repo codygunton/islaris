@@ -120,16 +120,22 @@ Notation "'WPevent' e {{ Φ } }" := (wp_event e Φ)
   (at level 20, e, Φ at level 200,
    format "'[' 'WPevent'  e  '/' '[   ' {{  Φ  } } ']' ']'") : bi_scope.
 
+(** [instr_pre' is_later a P]: given [P], execution can continue at [a]. The
+address [a] is either uncharged (the [instr] case) or charged (the
+[instr_charged] case); a charged fetch consumes one step credit. *)
 Definition instr_pre'_def `{!Arch} `{!islaG Σ} `{!threadG} (is_later : bool) (a : Z) (P : iProp Σ) : iProp Σ :=
   ▷?is_later (
   P -∗
-  ∃ ins,
+  (∃ ins,
     instr (bv_wrap 64 a) ins ∗
     match ins with
     | Some t => arch_pc_reg ↦ᵣ RVal_Bits (Z_to_bv 64 a) -∗ WPasm t
     | None => ∃ Pκs,
         ⌜∀ s, Pκs [SInstrTrap (Z_to_bv 64 a) s]⌝ ∗ spec_trace Pκs
-    end
+    end) ∨
+  (∃ t,
+    instr_charged (bv_wrap 64 a) t ∗ step_credits 1 ∗
+    (arch_pc_reg ↦ᵣ RVal_Bits (Z_to_bv 64 a) -∗ WPasm t))
    ).
 Definition instr_pre'_aux `{!Arch} `{!islaG Σ} `{!threadG} : seal (@instr_pre'_def _ Σ _ _). by eexists. Qed.
 Definition instr_pre' `{!Arch} `{!islaG Σ} `{!threadG} : bool → Z → iProp Σ → iProp Σ := (instr_pre'_aux).(unseal).
@@ -358,18 +364,47 @@ Section lifting.
     iIntros "HPC Hi Hcont". setoid_rewrite wp_asm_unfold.
     iIntros ([????]) "/= -> -> -> Hθ".
     iApply wp_lift_step; [done|].
-    iIntros (σ1 ??? ?) "(Hsctx&Hictx&Hmem)".
+    iIntros (σ1 ??? ?) "(Hsctx&Hictx&Hmem&Hch&Hbud)".
     iApply fupd_mask_intro; first set_solver. iIntros "HE".
     iDestruct (reg_mapsto_lookup with "Hθ HPC") as %HPC.
     iDestruct (instr_lookup_unsigned with "Hictx Hi") as %?.
+    iDestruct (instr_uncharged with "Hch Hi") as %?.
     iSplit. {
       iPureIntro. eexists _, _, _, _; simpl. econstructor; [done |by econstructor|]; simpl.
-      split; [done|]. eexists _. by simplify_option_eq.
+      eexists _. split; [done|]. by simplify_option_eq.
     }
     iIntros "!>" (????) "_". iMod "HE" as "_". iModIntro.
     inv_seq_step.
     revert select (∃ _, _) => -[?[?]]; unfold sail_name in *; simplify_option_eq.
-    move => [-> [? ->]].
+    move => [-> [? [-> ->]]].
+    iFrame. iSplitL; [|done].
+    iApply ("Hcont" with "HPC"); [done|done|done|].
+    iFrame.
+  Qed.
+
+  Lemma wp_next_instr_charged (PC : bv 64) ins :
+    arch_pc_reg ↦ᵣ RVal_Bits PC -∗
+    instr_charged (bv_unsigned PC) ins -∗
+    step_credits 1 -∗
+    ▷ (arch_pc_reg ↦ᵣ RVal_Bits PC -∗ WPasm ins) -∗
+    WPasm tnil.
+  Proof.
+    iIntros "HPC Hi Hcredit Hcont". setoid_rewrite wp_asm_unfold.
+    iIntros ([????]) "/= -> -> -> Hθ".
+    iApply wp_lift_step; [done|].
+    iIntros (σ1 ??? ?) "(Hsctx&Hictx&Hmem&Hch&Hbud)".
+    iApply fupd_mask_intro; first set_solver. iIntros "HE".
+    iDestruct (reg_mapsto_lookup with "Hθ HPC") as %HPC.
+    iDestruct (instr_charged_lookup with "Hictx Hch Hi") as %[??].
+    iSplit. {
+      iPureIntro. eexists _, _, _, _; simpl. econstructor; [done |by econstructor|]; simpl.
+      eexists _. split; [done|]. by simplify_option_eq.
+    }
+    iIntros "!>" (????) "_". iMod "HE" as "_".
+    inv_seq_step.
+    revert select (∃ _, _) => -[?[?]]; unfold sail_name in *; simplify_option_eq.
+    move => [-> [? [-> ->]]].
+    iMod (budget_spend with "Hbud Hcredit") as "Hbud". iModIntro.
     iFrame. iSplitL; [|done].
     iApply ("Hcont" with "HPC"); [done|done|done|].
     iFrame.
@@ -391,7 +426,7 @@ Section lifting.
     setoid_rewrite wp_asm_unfold.
     iIntros ([? regs ? ?]) "/= -> -> -> Hθ".
     iApply wp_lift_step; [done|].
-    iIntros (σ1 ??? ?) "(Hsctx&Hictx&Hmem)".
+    iIntros (σ1 ??? ?) "(Hsctx&Hictx&Hmem&?)".
     iApply fupd_mask_intro; first set_solver. iIntros "HE".
     iDestruct (reg_mapsto_lookup with "Hθ HPC") as %HPC.
     iDestruct (instr_lookup_unsigned with "Hictx Hi") as %?.
@@ -399,12 +434,12 @@ Section lifting.
     iDestruct (snapshot_mem_resources_agree with "Hmem HmemClaims") as %HmemAgree.
     iSplit. {
       iPureIntro. eexists _, _, _, _; simpl. econstructor; [done |by econstructor|]; simpl.
-      split; [done|]. eexists _. by simplify_option_eq.
+      eexists _. split; [done|]. by simplify_option_eq.
     }
     iIntros "!>" (????) "_". iMod "HE" as "_".
     inv_seq_step.
     revert select (∃ _, _) => -[?[?]]. unfold sail_name in *; simplify_option_eq.
-    move => [-> ->].
+    move => [-> [-> ->]].
     iMod (spec_ctx_cons with "Hsctx Hspec") as "[??]".
     { apply Haccept; assumption. }
     iModIntro.
@@ -420,16 +455,22 @@ Section lifting.
     WPasm tnil.
   Proof.
     rewrite instr_pre'_eq. iIntros "HPC Hpre HP".
-    iDestruct ("Hpre" with "[$HP]") as (ins) "(>Hinstr & Hwp)".
-    rewrite bv_wrap_small; [| by apply bv_unsigned_in_range].
-    iDestruct (laterN_le _ 1 with "Hwp") as "Hwp". { destruct l => /=; lia. }
-    destruct ins; rewrite Z_to_bv_bv_unsigned.
-    - by iApply (wp_next_instr with "HPC Hinstr"); [done..|].
-    - iDestruct "Hwp" as (Pκs) "[>%Haccept Hwp]".
-      iApply (wp_next_instr_extern with "[] [] [$] [$] [$]").
-      + intros snapshot _ _. exact (Haccept snapshot).
-      + rewrite /snapshot_reg_resources. done.
-      + rewrite /snapshot_mem_resources. done.
+    iDestruct ("Hpre" with "[$HP]") as "[Hpre|Hpre]".
+    - iDestruct "Hpre" as (ins) "(>Hinstr & Hwp)".
+      rewrite bv_wrap_small; [| by apply bv_unsigned_in_range].
+      iDestruct (laterN_le _ 1 with "Hwp") as "Hwp". { destruct l => /=; lia. }
+      destruct ins; rewrite Z_to_bv_bv_unsigned.
+      + by iApply (wp_next_instr with "HPC Hinstr"); [done..|].
+      + iDestruct "Hwp" as (Pκs) "[>%Haccept Hwp]".
+        iApply (wp_next_instr_extern with "[] [] [$] [$] [$]").
+        * intros snapshot _ _. exact (Haccept snapshot).
+        * rewrite /snapshot_reg_resources. done.
+        * rewrite /snapshot_mem_resources. done.
+    - iDestruct "Hpre" as (t) "(>Hinstr & >Hcredit & Hwp)".
+      rewrite bv_wrap_small; [| by apply bv_unsigned_in_range].
+      iDestruct (laterN_le _ 1 with "Hwp") as "Hwp". { destruct l => /=; lia. }
+      rewrite Z_to_bv_bv_unsigned.
+      iApply (wp_next_instr_charged with "HPC Hinstr Hcredit Hwp").
   Qed.
 
   Lemma instr_pre_wand a1 a2 l1 l2 P Q:
@@ -460,7 +501,7 @@ Section lifting.
     rewrite instr_pre'_eq.
     iIntros "Hinstr Hwp !> HP".
     iDestruct (instr_addr_in_range with "Hinstr") as %?.
-    iExists _. rewrite bv_wrap_small; [|done]. iFrame.
+    iLeft. iExists _. rewrite bv_wrap_small; [|done]. iFrame.
     iIntros "HPC". iApply ("Hwp" with "[$] [$]").
   Qed.
 
@@ -474,7 +515,21 @@ Section lifting.
     iIntros "Hinstr Hspec !> HP".
     iDestruct (instr_addr_in_range with "Hinstr") as %?.
     iDestruct ("Hspec" with "HP") as (??) "Hspec".
-    iExists _. rewrite bv_wrap_small; [|done]. iFrame. iExists _. by iFrame.
+    iLeft. iExists _. rewrite bv_wrap_small; [|done]. iFrame. iExists _. by iFrame.
+  Qed.
+
+  (** Convention: whoever proves a block pays for its first instruction out
+  of the block's precondition [P]. *)
+  Lemma instr_pre_intro_charged l P t a:
+    instr_charged a t -∗
+    (P -∗ step_credits 1 ∗ (arch_pc_reg ↦ᵣ RVal_Bits (Z_to_bv 64 a) -∗ WPasm t)) -∗
+    instr_pre' l a P.
+  Proof.
+    rewrite instr_pre'_eq.
+    iIntros "Hinstr Hwp !> HP".
+    iDestruct (instr_charged_addr_in_range with "Hinstr") as %?.
+    iRight. iExists _. rewrite bv_wrap_small; [|done]. iFrame "Hinstr".
+    iApply ("Hwp" with "HP").
   Qed.
 
   (** * Case distinction  *)
@@ -642,7 +697,7 @@ Section lifting.
     iIntros (??) "Hm Hcont". setoid_rewrite wp_asm_unfold. subst.
     iIntros ([????]) "/= -> -> -> Hθ".
     iApply wp_lift_step; [done|].
-    iIntros (σ1 ????) "(Hctx&Hictx&Hmem)".
+    iIntros (σ1 ????) "(Hctx&Hictx&Hmem&?)".
     iApply fupd_mask_intro; first set_solver. iIntros "HE".
     iDestruct (mem_mapsto_lookup with "Hmem Hm") as %[len' [??]].
     have ? : len' = len by lia. subst.
@@ -695,7 +750,7 @@ Section lifting.
     subst. setoid_rewrite wp_asm_unfold.
     iIntros ([????]) "/= -> -> -> Hθ".
     iApply wp_lift_step; [done|].
-    iIntros (σ1 ????) "(Hctx&Hictx&Hmem)".
+    iIntros (σ1 ????) "(Hctx&Hictx&Hmem&?)".
     iApply fupd_mask_intro; first set_solver. iIntros "HE".
     iDestruct (mmio_range_lookup with "Hmem Hm") as %Hread; [done|].
     rewrite N2Z.id in Hread.
@@ -726,7 +781,7 @@ Section lifting.
     iIntros (??) "Hm Hcont". subst. setoid_rewrite wp_asm_unfold.
     iIntros ([????]) "/= -> -> -> Hθ".
     iApply wp_lift_step; [done|].
-    iIntros (σ1 ????) "(Hctx&Hictx&Hmem)".
+    iIntros (σ1 ????) "(Hctx&Hictx&Hmem&?)".
     iApply fupd_mask_intro; first set_solver. iIntros "HE".
     iDestruct (mem_mapsto_lookup with "Hmem Hm") as %[len' [??]].
     have ? : len' = len by lia. subst.
@@ -778,7 +833,7 @@ Section lifting.
     subst. setoid_rewrite wp_asm_unfold.
     iIntros ([????]) "/= -> -> -> Hθ".
     iApply wp_lift_step; [done|].
-    iIntros (σ1 ????) "(Hctx&Hictx&Hmem)".
+    iIntros (σ1 ????) "(Hctx&Hictx&Hmem&?)".
     iApply fupd_mask_intro; first set_solver. iIntros "HE".
     iDestruct (mmio_range_lookup with "Hmem Hm") as %Hread; [done|].
     rewrite N2Z.id in Hread.

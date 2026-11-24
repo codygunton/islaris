@@ -681,13 +681,15 @@ Definition let_bind_hint {A B} (x : A) (f : A → B) : B :=
   f x.
 
 Inductive instr_kind {Σ} : Type :=
-| IKInstr (ins : option isla_trace) | IKPre (l : bool) (P : iProp Σ).
+| IKInstr (ins : option isla_trace) | IKPre (l : bool) (P : iProp Σ)
+| IKCharged (t : isla_trace).
 Definition FindInstrKind {Σ} `{!Arch} `{!islaG Σ} `{!threadG} (a : Z) (l : bool) := {|
   fic_A := @instr_kind Σ;
   fic_Prop ik :=
     match ik with
     | IKInstr ins => instr a ins
     | IKPre l' P => instr_pre' l' a P
+    | IKCharged t => instr_charged a t
     end
 |}.
 Global Typeclasses Opaque FindInstrKind.
@@ -767,6 +769,14 @@ Section instances.
     [instance find_in_context_instr_kind_instr with FICSyntactic].
   Global Existing Instance find_in_context_instr_kind_instr_inst | 10.
 
+  Lemma find_in_context_instr_kind_charged a l T:
+    (∃ t, instr_charged a t ∗ T (IKCharged t))
+    ⊢ find_in_context (FindInstrKind a l) T.
+  Proof. iDestruct 1 as (?) "[??]". iExists _. by iFrame. Qed.
+  Definition find_in_context_instr_kind_charged_inst :=
+    [instance find_in_context_instr_kind_charged with FICSyntactic].
+  Global Existing Instance find_in_context_instr_kind_charged_inst | 20.
+
   Inductive FICInstrSemantic : Set :=.
   Definition find_in_context_instr_pre_semantic_false_inst :=
     [instance find_in_context_instr_kind_pre_false with FICInstrSemantic].
@@ -778,6 +788,10 @@ Section instances.
   Definition find_in_context_instr_semantic_inst :=
     [instance find_in_context_instr_kind_instr with FICInstrSemantic].
   Global Existing Instance find_in_context_instr_semantic_inst | 110.
+
+  Definition find_in_context_instr_charged_semantic_inst :=
+    [instance find_in_context_instr_kind_charged with FICInstrSemantic].
+  Global Existing Instance find_in_context_instr_charged_semantic_inst | 120.
 
   Global Instance mem_related A a n (v : A → bv n) : RelatedTo (λ x, a ↦ₘ (v x))%I := {|
     rt_fic := FindMemMapsTo a;
@@ -865,6 +879,10 @@ Section instances.
 
   Global Instance instr_related A a i : RelatedTo (λ x : A, instr a (i x)) := {|
     rt_fic := FindDirect (λ i, instr a i)%I;
+  |}.
+
+  Global Instance instr_charged_related A a t : RelatedTo (λ x : A, instr_charged a (t x)) := {|
+    rt_fic := FindDirect (λ t, instr_charged a t)%I;
   |}.
 
   Global Instance instr_pre'_related A b a P : RelatedTo (λ x : A, instr_pre' b a (P x)) := {|
@@ -1194,6 +1212,7 @@ Section instances.
      | IKInstr (None) =>
        ∃ Pκs, spec_trace Pκs ∗ ⌜scons (SInstrTrap newPC) snil ⊆ Pκs⌝ ∗ True
      | IKPre l P => P
+     | IKCharged t => step_credits 1 ∗ (arch_pc_reg ↦ᵣ RVal_Bits newPC -∗ WPasm t)
      end
     )))
     ⊢ WPasm tnil.
@@ -1201,7 +1220,7 @@ Section instances.
     unfold normalize_instr_addr. iDestruct 1 as (?) "(HPC&%normPC&%Hnorm&Hwp)".
     have ? := bv_unsigned_in_range _ nPC.
     iDestruct "Hwp" as (ins) "[Hi Hwp]".
-    destruct ins as [[?|]|?] => /=.
+    destruct ins as [[?|]|?|?] => /=.
     - iDestruct (instr_addr_in_range with "Hi") as %?.
       rewrite !bv_wrap_small // in Hnorm. subst.
       iApply (wp_next_instr with "HPC Hi") => //.
@@ -1220,6 +1239,12 @@ Section instances.
     - iApply (wp_next_instr_pre with "[$] [Hi] Hwp").
       iApply (instr_pre_wand with "Hi"); [by erewrite implb_same| |by iIntros "$"].
       by rewrite -Hnorm bv_wrap_small.
+    - iDestruct "Hwp" as "[Hcredit Hwp]".
+      iDestruct (instr_charged_addr_in_range with "Hi") as %?.
+      rewrite !bv_wrap_small // in Hnorm. subst.
+      iApply (wp_next_instr_charged with "HPC Hi Hcredit").
+      iIntros "!> ?". rewrite Z_to_bv_bv_unsigned.
+      iApply ("Hwp" with "[$]").
   Qed.
 
   Lemma li_instr_pre l a P:
@@ -1232,12 +1257,14 @@ Section instances.
      | IKInstr None =>
        P -∗ ∃ Pκs, spec_trace Pκs ∗ ⌜scons (SInstrTrap newPC) snil ⊆ Pκs⌝ ∗ True
      | IKPre l' Q => ⌜implb l' l⌝ ∗ (P -∗ Q)
+     | IKCharged t =>
+       P -∗ step_credits 1 ∗ (arch_pc_reg ↦ᵣ RVal_Bits newPC -∗ WPasm t)
      end
     )))
     ⊢ instr_pre' l a P.
   Proof.
     unfold normalize_instr_addr.  iDestruct 1 as (normPC Hnorm ins) "[Hinstr Hwp]".
-    destruct ins as [[?|]|?] => /=.
+    destruct ins as [[?|]|?|?] => /=.
     - iDestruct (instr_addr_in_range with "Hinstr") as %?.
       rewrite (bv_wrap_small _ normPC) // in Hnorm. subst.
       iApply (instr_pre_wand with "[-]"); [by erewrite implb_same| | | iIntros "HP"; iApply "HP"].
@@ -1252,6 +1279,11 @@ Section instances.
       iExists _. iFrame. iPureIntro. spec_solver.
     - iDestruct "Hwp" as (?) "Hwand".
       by iApply (instr_pre_wand with "Hinstr").
+    - iDestruct (instr_charged_addr_in_range with "Hinstr") as %?.
+      rewrite (bv_wrap_small _ normPC) // in Hnorm. subst.
+      iApply (instr_pre_wand with "[-]"); [by erewrite implb_same| | | iIntros "HP"; iApply "HP"].
+      2: by iApply (instr_pre_intro_charged with "[$]").
+      by rewrite bv_wrap_bv_wrap.
   Qed.
 
   Lemma li_wp_cases ts:
@@ -1716,6 +1748,13 @@ Lemma tac_instr_eq `{islaG Σ} a1 a2 ins1 ins2:
 Proof. by move => ->. Qed.
 #[ global ] Hint Extern 10 (FindHypEqual FICInstrSemantic (instr _ _) (instr _ _) _) =>
   ( apply tac_instr_eq; bv_solve) : typeclass_instances.
+
+Lemma tac_instr_charged_eq `{islaG Σ} a1 a2 t1 t2:
+  a1 = a2 →
+  FindHypEqual FICInstrSemantic (instr_charged a1 t1) (instr_charged a2 t2) (instr_charged a1 t2).
+Proof. by move => ->. Qed.
+#[ global ] Hint Extern 10 (FindHypEqual FICInstrSemantic (instr_charged _ _) (instr_charged _ _) _) =>
+  ( apply tac_instr_charged_eq; bv_solve) : typeclass_instances.
 
 (* TODO: upstream? *)
 Global Opaque FindHypEqual.

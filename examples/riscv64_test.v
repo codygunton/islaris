@@ -104,7 +104,9 @@ Definition riscv_test_state_global (x2 : bv 64) := {|
     <[ (BV 64 0x000000001030000c) := ac]> $
     <[ (BV 64 0x0000000010300010) := a10]> $
     ∅;
-    seq_mem := list_to_map (zip (bv_seq (bv_add_Z x2 8) 8) (replicate 8 (bv_0 8)))
+    seq_mem := list_to_map (zip (bv_seq (bv_add_Z x2 8) 8) (replicate 8 (bv_0 8)));
+    seq_charged := ∅;
+    seq_fetches := 0
 |}.
 Local Arguments zip_with : simpl never.
 Local Arguments list_to_map : simpl never.

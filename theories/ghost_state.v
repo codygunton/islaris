@@ -72,6 +72,12 @@ Definition instrtblUR : cmra :=
 Definition backed_memUR : cmra :=
   agreeR (leibnizO (gset addr)).
 
+Definition chargedUR : cmra :=
+  agreeR (leibnizO (gset addr)).
+
+Definition budgetUR : cmra :=
+  authR natUR.
+
 
 Class heapG Σ := HeapG {
   heap_instrs_inG :: inG Σ instrtblUR;
@@ -86,6 +92,11 @@ Class heapG Σ := HeapG {
   heap_spec_trace : list seq_label → Prop;
   heap_spec_trace_inG :: inG Σ (dfrac_agreeR specO);
   heap_spec_trace_name : gname;
+  heap_charged_inG :: inG Σ chargedUR;
+  heap_charged_name : gname;
+  heap_budget_inG :: inG Σ budgetUR;
+  heap_budget_name : gname;
+  heap_budget_total : nat;
 }.
 
 Class threadG := ThreadG {
@@ -102,22 +113,58 @@ Definition to_backed_mem : gset addr → backed_memUR :=
 Section definitions.
   Context `{!heapG Σ}.
 
-  Definition instr_table_def (i : gmap addr isla_trace) : iProp Σ :=
+  Definition instr_table_raw_def (i : gmap addr isla_trace) : iProp Σ :=
     own heap_instrs_name (to_instrtbl i).
+  Definition instr_table_raw_aux : seal (@instr_table_raw_def). by eexists. Qed.
+  Definition instr_table_raw := unseal instr_table_raw_aux.
+  Definition instr_table_raw_eq : @instr_table_raw = @instr_table_raw_def :=
+    seal_eq instr_table_raw_aux.
+
+  (** The set of charged addresses: every fetch of an instruction at one of
+  these addresses consumes a [step_credits 1]. *)
+  Definition charged_set_def (S : gset addr) : iProp Σ :=
+    own heap_charged_name (to_agree (S : leibnizO (gset addr))).
+  Definition charged_set_aux : seal (@charged_set_def). by eexists. Qed.
+  Definition charged_set := unseal charged_set_aux.
+  Definition charged_set_eq : @charged_set = @charged_set_def :=
+    seal_eq charged_set_aux.
+
+  Definition step_credits_def (n : nat) : iProp Σ :=
+    own heap_budget_name (◯ (n : natUR)).
+  Definition step_credits_aux : seal (@step_credits_def). by eexists. Qed.
+  Definition step_credits := unseal step_credits_aux.
+  Definition step_credits_eq : @step_credits = @step_credits_def :=
+    seal_eq step_credits_aux.
+
+  (** An instruction table in which no address is charged. *)
+  Definition instr_table_def (i : gmap addr isla_trace) : iProp Σ :=
+    instr_table_raw i ∗ charged_set ∅.
   Definition instr_table_aux : seal (@instr_table_def). by eexists. Qed.
   Definition instr_table := unseal instr_table_aux.
   Definition instr_table_eq : @instr_table = @instr_table_def :=
     seal_eq instr_table_aux.
 
   Definition instr_def (a : Z) (i: option isla_trace) : iProp Σ :=
-    ∃ instrs b, ⌜Z_to_bv_checked 64 a = Some b⌝ ∗ ⌜instrs !! b = i⌝ ∗ instr_table instrs.
+    ∃ instrs b S, ⌜Z_to_bv_checked 64 a = Some b⌝ ∗ ⌜instrs !! b = i⌝ ∗ ⌜b ∉ S⌝ ∗
+      instr_table_raw instrs ∗ charged_set S.
   Definition instr_aux : seal (@instr_def). by eexists. Qed.
   Definition instr := unseal instr_aux.
   Definition instr_eq : @instr = @instr_def :=
     seal_eq instr_aux.
 
+  Definition instr_charged_def (a : Z) (t : isla_trace) : iProp Σ :=
+    ∃ instrs b S, ⌜Z_to_bv_checked 64 a = Some b⌝ ∗ ⌜instrs !! b = Some t⌝ ∗ ⌜b ∈ S⌝ ∗
+      instr_table_raw instrs ∗ charged_set S.
+  Definition instr_charged_aux : seal (@instr_charged_def). by eexists. Qed.
+  Definition instr_charged := unseal instr_charged_aux.
+  Definition instr_charged_eq : @instr_charged = @instr_charged_def :=
+    seal_eq instr_charged_aux.
+
   Definition instr_ctx (intrs : gmap addr isla_trace) : iProp Σ :=
-    instr_table intrs.
+    instr_table_raw intrs.
+
+  Definition budget_ctx (f : nat) : iProp Σ :=
+    ∃ m : nat, own heap_budget_name (● (m : natUR)) ∗ ⌜(m + f = heap_budget_total)%nat⌝.
 
   Definition reg_mapsto_def (γ : gname) (r : string) (q : frac) (v: valu) : iProp Σ :=
     r ↪[ γ ]{# q} v.
@@ -239,7 +286,9 @@ Section definitions.
   Definition state_ctx (σ : seq_global_state) (κs : list seq_label) : iProp Σ :=
     spec_ctx κs ∗
     instr_ctx σ.(seq_instrs) ∗
-    mem_ctx σ.(seq_mem).
+    mem_ctx σ.(seq_mem) ∗
+    charged_set σ.(seq_charged) ∗
+    budget_ctx σ.(seq_fetches).
 
   Definition thread_ctx `{!threadG} (regs : reg_map) : iProp Σ :=
     regs_ctx regs.
@@ -281,6 +330,21 @@ Notation "a ↦ₘ? n" := (mem_mapsto_uninit a (DfracOwn 1) n) (at level 20) : b
 Section instr.
   Context `{!heapG Σ}.
 
+  Global Instance instr_table_raw_pers i : Persistent (instr_table_raw i).
+  Proof. rewrite instr_table_raw_eq. by apply _. Qed.
+
+  Global Instance instr_table_raw_tl i : Timeless (instr_table_raw i).
+  Proof. rewrite instr_table_raw_eq. by apply _. Qed.
+
+  Global Instance charged_set_pers S : Persistent (charged_set S).
+  Proof. rewrite charged_set_eq. by apply _. Qed.
+
+  Global Instance charged_set_tl S : Timeless (charged_set S).
+  Proof. rewrite charged_set_eq. by apply _. Qed.
+
+  Global Instance step_credits_tl n : Timeless (step_credits n).
+  Proof. rewrite step_credits_eq. by apply _. Qed.
+
   Global Instance instr_table_pers i : Persistent (instr_table i).
   Proof. rewrite instr_table_eq. by apply _. Qed.
 
@@ -293,10 +357,23 @@ Section instr.
   Global Instance instr_tl a i : Timeless (instr a i).
   Proof. rewrite instr_eq. by apply _. Qed.
 
+  Global Instance instr_charged_pers a t : Persistent (instr_charged a t).
+  Proof. rewrite instr_charged_eq. by apply _. Qed.
+
+  Global Instance instr_charged_tl a t : Timeless (instr_charged a t).
+  Proof. rewrite instr_charged_eq. by apply _. Qed.
+
   Lemma instr_addr_in_range a i:
     instr a i -∗ ⌜0 ≤ a < bv_modulus 64⌝.
   Proof.
-    rewrite instr_eq/instr_def. iDestruct 1 as (??->%Z_to_bv_checked_Some) "?".
+    rewrite instr_eq/instr_def. iDestruct 1 as (???->%Z_to_bv_checked_Some) "?".
+    iPureIntro. apply bv_unsigned_in_range.
+  Qed.
+
+  Lemma instr_charged_addr_in_range a t:
+    instr_charged a t -∗ ⌜0 ≤ a < bv_modulus 64⌝.
+  Proof.
+    rewrite instr_charged_eq/instr_charged_def. iDestruct 1 as (???->%Z_to_bv_checked_Some) "?".
     iPureIntro. apply bv_unsigned_in_range.
   Qed.
 
@@ -305,27 +382,43 @@ Section instr.
     ins !! (@BV _ a Hwf) = i →
     instr_table ins -∗ instr a i.
   Proof.
-    rewrite instr_eq. iIntros (??) "?". iExists _, _. iFrame.
-    iPureIntro. split; [|done].
+    rewrite instr_eq instr_table_eq. iIntros (??) "[??]". iExists _, _, ∅. iFrame.
+    iPureIntro. split_and!; [|done|set_solver].
     unfold Z_to_bv_checked. case_guard => //=.
     f_equal. by apply bv_eq.
+  Qed.
+
+  Lemma instr_table_raw_agree i1 i2 :
+    instr_table_raw i1 -∗ instr_table_raw i2 -∗ ⌜i1 = i2⌝.
+  Proof.
+    rewrite instr_table_raw_eq. iIntros "H1 H2".
+    iDestruct (own_valid_2 with "H1 H2") as %Hvalid.
+    move: Hvalid => /to_agree_op_valid.
+      by fold_leibniz.
+  Qed.
+
+  Lemma charged_set_agree S1 S2 :
+    charged_set S1 -∗ charged_set S2 -∗ ⌜S1 = S2⌝.
+  Proof.
+    rewrite charged_set_eq. iIntros "H1 H2".
+    iDestruct (own_valid_2 with "H1 H2") as %Hvalid.
+    move: Hvalid => /to_agree_op_valid.
+      by fold_leibniz.
   Qed.
 
   Lemma instr_table_agree i1 i2 :
     instr_table i1 -∗ instr_table i2 -∗ ⌜i1 = i2⌝.
   Proof.
-    rewrite instr_table_eq. iIntros "H1 H2".
-    iDestruct (own_valid_2 with "H1 H2") as %Hvalid.
-    move: Hvalid => /to_agree_op_valid.
-      by fold_leibniz.
+    rewrite instr_table_eq. iIntros "[H1 _] [H2 _]".
+    iApply (instr_table_raw_agree with "H1 H2").
   Qed.
 
   Lemma instr_lookup instrs a i :
     instr_ctx instrs -∗ instr a i -∗ ⌜∃ b, Z_to_bv_checked 64 a = Some b ∧ instrs !! b = i⌝.
   Proof.
     rewrite instr_eq. iIntros "Htbl Hf".
-    iDestruct "Hf" as (i2 ? ??) "Hf". iExists _.
-    by iDestruct (instr_table_agree with "Htbl Hf") as %->.
+    iDestruct "Hf" as (i2 ? ? ???) "[Hf _]". iExists _.
+    by iDestruct (instr_table_raw_agree with "Htbl Hf") as %->.
   Qed.
 
   Lemma instr_lookup_unsigned instrs i (a : bv 64) :
@@ -334,6 +427,63 @@ Section instr.
     iIntros "Hctx Hinstr". iDestruct (instr_lookup with "Hctx Hinstr") as %[b [Hb ?]].
     iPureIntro. unfold Z_to_bv_checked in *. case_guard => //=; by simplify_eq/=.
   Qed.
+
+  Lemma instr_uncharged S i (a : bv 64) :
+    charged_set S -∗ instr (bv_unsigned a) i -∗ ⌜a ∉ S⌝.
+  Proof.
+    rewrite instr_eq. iIntros "HS Hf".
+    iDestruct "Hf" as (? b S' Hb ??) "[_ HS']".
+    rewrite Z_to_bv_checked_bv_unsigned in Hb. simplify_eq.
+    by iDestruct (charged_set_agree with "HS HS'") as %->.
+  Qed.
+
+  Lemma instr_charged_lookup instrs S t (a : bv 64) :
+    instr_ctx instrs -∗ charged_set S -∗ instr_charged (bv_unsigned a) t -∗
+    ⌜instrs !! a = Some t ∧ a ∈ S⌝.
+  Proof.
+    rewrite instr_charged_eq. iIntros "Htbl HS Hf".
+    iDestruct "Hf" as (? b S' Hb ??) "[Hf HS']".
+    rewrite Z_to_bv_checked_bv_unsigned in Hb. simplify_eq.
+    iDestruct (instr_table_raw_agree with "Htbl Hf") as %->.
+    by iDestruct (charged_set_agree with "HS HS'") as %->.
+  Qed.
+
+  Lemma instr_table_split instrs S :
+    instr_table_raw instrs -∗ charged_set S -∗
+    ([∗ map] a ↦ t ∈ filter (λ p, p.1 ∉ S) instrs, instr (bv_unsigned a) (Some t)) ∗
+    ([∗ map] a ↦ t ∈ filter (λ p, p.1 ∈ S) instrs, instr_charged (bv_unsigned a) t).
+  Proof.
+    iIntros "#Htbl #HS".
+    iSplit; iApply big_sepM_intro; iIntros "!>" (a t [? ?]%map_lookup_filter_Some).
+    - rewrite instr_eq. iExists _, _, _. iFrame "#".
+      by rewrite Z_to_bv_checked_bv_unsigned.
+    - rewrite instr_charged_eq. iExists _, _, _. iFrame "#".
+      by rewrite Z_to_bv_checked_bv_unsigned.
+  Qed.
+
+  Lemma step_credits_split n m :
+    step_credits (n + m) ⊣⊢ step_credits n ∗ step_credits m.
+  Proof. by rewrite step_credits_eq /step_credits_def -own_op -auth_frag_op. Qed.
+
+  Lemma step_credits_0 :
+    ⊢ |==> step_credits 0.
+  Proof. rewrite step_credits_eq /step_credits_def. apply own_unit. Qed.
+
+  Lemma budget_spend f :
+    budget_ctx f -∗ step_credits 1 ==∗ budget_ctx (S f).
+  Proof.
+    rewrite step_credits_eq /step_credits_def.
+    iDestruct 1 as (m) "[Ha %Hm]". iIntros "Hf".
+    iDestruct (own_valid_2 with "Ha Hf") as
+      %[?%nat_included _]%auth_both_valid_discrete.
+    iMod (own_update_2 with "Ha Hf") as "Ha".
+    { apply auth_update_dealloc, (nat_local_update _ _ (m - 1) 0). lia. }
+    iModIntro. iExists (m - 1)%nat. iFrame. iPureIntro. lia.
+  Qed.
+
+  Lemma budget_bound f :
+    budget_ctx f -∗ ⌜(f ≤ heap_budget_total)%nat⌝.
+  Proof. iDestruct 1 as (m) "[_ %]". iPureIntro. lia. Qed.
 
 End instr.
 
