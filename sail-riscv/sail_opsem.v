@@ -613,11 +613,11 @@ Definition sim {A E} (Σ : sim_state) (e1 : monad register_value A E) (K : mctx 
       raw_sim sail_module (iris_module isla_lang) n
           (SAIL (Done tt) sail_regs' isla_regs' mem' sail_instrs false)
           ({| seq_trace := tnil; seq_regs := isla_regs'; seq_nb_state := false; seq_pc_reg := arch_pc_reg|},
-           {| seq_instrs := isla_instrs; seq_mem := mem' |})) →
+           {| seq_instrs := isla_instrs; seq_mem := mem'; seq_charged := ∅; seq_fetches := 0 |})) →
   raw_sim sail_module (iris_module isla_lang) n
           (SAIL (mctx_interp K e1) Σ.(sim_regs) isla_regs mem sail_instrs false)
           ({| seq_trace := e2; seq_regs := isla_regs; seq_nb_state := false; seq_pc_reg := arch_pc_reg|},
-           {| seq_instrs := isla_instrs; seq_mem := mem |}).
+           {| seq_instrs := isla_instrs; seq_mem := mem; seq_charged := ∅; seq_fetches := 0 |}).
 
 Definition sim_instr (si : encoded_instruction) (i : isla_trace) :=
   ∀ regs, sim (SIM regs) (step_cpu si) NilMCtx i.
@@ -628,7 +628,7 @@ Lemma sim_implies_refines sail_instrs isla_instrs sail_regs isla_regs mem :
   private_regs_wf isla_regs →
   (∀ a si ii, sail_instrs !! a = Some si → isla_instrs !! a = Some ii → sim_instr si ii) →
   refines sail_module (SAIL (Done tt) sail_regs isla_regs mem sail_instrs false)
-          (iris_module isla_lang) (initial_local_state isla_regs, {| seq_instrs := isla_instrs; seq_mem := mem |}).
+          (iris_module isla_lang) (initial_local_state isla_regs, {| seq_instrs := isla_instrs; seq_mem := mem; seq_charged := ∅; seq_fetches := 0 |}).
 Proof.
   move => Hdom Hregs Hpriv Hsim. apply: raw_sim_implies_refines => n.
   elim/lt_wf_ind: n sail_regs isla_regs mem Hregs Hpriv.
@@ -646,9 +646,9 @@ Proof.
     apply: raw_sim_step_i. { right. eexists _, _. by econstructor. }
     move => ???? Hstep. inversion_clear Hstep; simplify_eq. split; [done|].
     apply: raw_sim_step_s. {
-      econstructor. econstructor; [done| econstructor |] => /=. split; [done|].
+      econstructor. econstructor; [done| econstructor |] => /=.
       eexists (mword_to_bv (PC sail_regs)). split; [done|].
-      rewrite Hii. naive_solver.
+      rewrite Hii /=. try (case_decide; [set_solver|]). naive_solver.
     }
     apply: Hsim; [done..|].
     move => sail_regs' isla_regs' mem' Hwf' ??.
@@ -657,7 +657,7 @@ Proof.
     constructor => Hsafe. split. { right. eexists _, _. by econstructor. }
     move => ???? Hstep. inversion_clear Hstep; simplify_eq. eexists _. split. {
       apply: (steps_l _ _ _ _ (Some _)); [| by apply: steps_refl].
-      constructor. econstructor; [done| econstructor |] => /=. split; [done|].
+      constructor. econstructor; [done| econstructor |] => /=.
       eexists _; simplify_option_eq. naive_solver.
     }
     apply: raw_sim_step_i. { by left. }
